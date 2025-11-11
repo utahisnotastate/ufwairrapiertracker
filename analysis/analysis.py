@@ -1,75 +1,85 @@
 # analysis.py
-# Reads the attack_log.csv and generates analytics.
-# Needs: pip install pandas matplotlib
+# ufwairrapiertracker V2.0 - ML Anomaly Detection
+# Uses Isolation Forest to find "attack" signatures in sensor data.
+# Inspired by:
 
 import pandas as pd
 import matplotlib.pyplot as plt
 import os
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
 
-LOG_FILE = 'attack_log.csv'
+LOG_FILE = 'sensor_log.csv'
+# Define the features to analyze for anomalies
+FEATURES = ['pressure_delta', 'vibration_mag', 'audio_level']
 
 
-def analyze_attacks(df):
+def analyze_log(df):
     if df.empty:
-        print("No attack data found.")
+        print("Log is empty.")
         return
 
-    num_attacks = len(df)
-    avg_duration = df['duration_ms'].mean()
-    avg_pressure_drop = df['avg_delta_pa'].mean()
+    print("--- Sensor Log Analysis (V2.0) ---")
 
-    print("--- AIR RAPIER ATTACK ANALYSIS ---")
-    print(f"Total Attacks Logged: {num_attacks}")
-    print(f"Average Duration: {avg_duration:.2f} ms")
-    print(f"Average Pressure Drop: {avg_pressure_drop:.2f} Pa")
+    # 1. Prepare data
+    # We can't feed raw data to the model. We must scale it.
+    scaler = StandardScaler()
+    df_scaled = scaler.fit_transform(df[FEATURES])
 
-    # Activity analysis
-    if 'activity' in df.columns:
-        activity_counts = df['activity'].value_counts()
-        print("\n--- Activity During Attacks ---")
-        print(activity_counts)
+    # 2. Train Anomaly Detection Model
+    # IsolationForest is fast and effective.
+    # 'contamination' is the expected % of anomalies. Let's start low.
+    model = IsolationForest(contamination=0.001, random_state=42)
+    print("Training ML model...")
+    model.fit(df_scaled)
 
-        most_common_activity = activity_counts.idxmax()
-        print(f"\nMost Common Activity During Attack: {most_common_activity}")
+    # 3. Predict Anomalies
+    print("Predicting anomalies...")
+    df['anomaly_score'] = model.decision_function(df_scaled)
+    df['is_anomaly'] = model.predict(df_scaled)  # -1 for anomaly, 1 for normal
 
-        # Plot Activity Pie Chart
-        activity_counts.plot(kind='pie',
-                             title='Activity During Attacks',
-                             autopct='%1.1f%%',
-                             startangle=90,
-                             figsize=(8, 8))
-        plt.ylabel('')  # Hide the 'activity' label
-        plt.savefig('attack_activity_pie.png')
-        print("Saved 'attack_activity_pie.png'")
+    # Get all "attack" events
+    attacks = df[df['is_anomaly'] == -1]
+
+    if attacks.empty:
+        print("\n--- RESULT ---")
+        print("No significant anomalies (attacks) detected in the log.")
+    else:
+        print(f"\n--- {len(attacks)} ANOMALOUS EVENTS DETECTED ---")
+        print("These are the moments that match the 3-sensor attack signature:")
+        print(attacks[['pressure_delta', 'vibration_mag', 'audio_level', 'anomaly_score']])
+
+        # Plot the main graph
+        print("Generating anomaly plot...")
+        fig, ax = plt.subplots(figsize=(20, 8))
+
+        # Plot the anomaly score
+        ax.plot(df.index, df['anomaly_score'], label='Anomaly Score', color='blue', alpha=0.5)
+        ax.set_ylabel('Anomaly Score', color='blue')
+
+        # Highlight attacks
+        ax.scatter(attacks.index, attacks['anomaly_score'], color='red', label='Detected Attack', s=50, zorder=10)
+
+        # Plot pressure delta on a second y-axis to correlate
+        ax2 = ax.twinx()
+        ax2.plot(df.index, df['pressure_delta'], label='Pressure Delta (Pa)', color='green', alpha=0.3)
+        ax2.set_ylabel('Pressure Delta (Pa)', color='green')
+
+        plt.title('V2.0 Attack Analysis: Anomaly Score vs. Pressure')
+        fig.legend(loc="upper right", bbox_to_anchor=(0.9, 0.9))
+        plt.grid(True)
+        plt.savefig('attack_analysis_V2.png')
+        print("Saved 'attack_analysis_V2.png'")
         plt.clf()
-
-    # Plot Attack Duration Histogram
-    df['duration_ms'].plot(kind='hist',
-                           bins=20,
-                           title='Attack Duration Distribution',
-                           figsize=(10, 6))
-    plt.xlabel('Duration (ms)')
-    plt.savefig('attack_duration_hist.png')
-    print("Saved 'attack_duration_hist.png'")
-    plt.clf()
-
-    # Plot Pressure vs. Duration
-    df.plot(kind='scatter',
-            x='duration_ms',
-            y='avg_delta_pa',
-            title='Attack Intensity vs. Duration',
-            figsize=(10, 6))
-    plt.xlabel('Duration (ms)')
-    plt.ylabel('Average Pressure Drop (Pa)')
-    plt.savefig('attack_pressure_vs_duration.png')
-    print("Saved 'attack_pressure_vs_duration.png'")
-    plt.clf()
 
 
 if __name__ == "__main__":
     if not os.path.exists(LOG_FILE):
         print(f"Error: {LOG_FILE} not found. Copy it from the SD card.")
     else:
-        # Load the CSV
+        print(f"Loading log file: {LOG_FILE}...")
         data = pd.read_csv(LOG_FILE)
-        analyze_attacks(data)
+        # Convert ms timestamp to a simple index for plotting
+        data = data.reset_index()
+
+        analyze_log(data)

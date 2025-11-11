@@ -1,21 +1,24 @@
 # main.py
-# Air Rapier "Chronos" Attack Logger
-# (c) 2025, Master Maker
+# ufwairrapiertracker V2.0 - Sensor Fusion Logger
 
 import machine
 import uos
 import time
-import mpu6050  # You will need to get this library
-import bme280  # You will need to get this library
-from machine import Pin, SoftI2C, SPI
-from sdcard import SDCard
+import mpu6050  # From /lib
+import bme280  # From /lib
+from machine import Pin, SoftI2C, SPI, ADC
+from sdcard import SDCard  # From /lib
 
 # --- Config ---
-# I2C
+# I2C (BME280s, MPU6050)
 I2C_SCL_PIN = 22
 I2C_SDA_PIN = 21
 BME280_A_ADDR = 0x76  # Target Sensor (Butt)
 BME280_B_ADDR = 0x77  # Ambient Sensor (Chest)
+MPU6050_ADDR = 0x68
+
+# ADC (Microphone)
+MIC_ADC_PIN = 35
 
 # SPI (SD Card)
 SPI_SCK_PIN = 18
@@ -24,59 +27,44 @@ SPI_MISO_PIN = 19
 SPI_CS_PIN = 5
 SD_MOUNT_POINT = '/sd'
 
-# Logic
-ATTACK_THRESHOLD_PA = 150  # Attack trigger (Pascals). 150 Pa is a sharp, sudden change. Tune this.
-ATTACK_END_THRESHOLD_PA = 50  # When the differential is back within this range
-LOG_FILE = f"{SD_MOUNT_POINT}/attack_log.csv"
+LOG_FILE = f"{SD_MOUNT_POINT}/sensor_log.csv"
+LOG_INTERVAL_MS = 50  # Log 20 times per second for high-res data
 
 # --- Globals ---
 i2c = None
 bme_a = None  # Target
 bme_b = None  # Ambient
-mpu = None  # Activity
+mpu = None  # Activity/Vibration
+mic_adc = None  # Acoustic
 sd = None  # SD Card
-
-# State machine for attack detection
-STATE_IDLE = 0
-STATE_ATTACK = 1
-attack_state = STATE_IDLE
-attack_start_time = 0
-attack_pressures = []
-attack_activity = "Unknown"
 
 
 # --- Initialization ---
-def init_sensors():
-    global i2c, bme_a, bme_b, mpu
-    print("Initializing I2C and sensors...")
+def init_all():
+    global i2c, bme_a, bme_b, mpu, mic_adc, sd
+    print("Initializing components...")
+
     try:
+        # I2C
         i2c = SoftI2C(scl=Pin(I2C_SCL_PIN), sda=Pin(I2C_SDA_PIN))
         devices = i2c.scan()
         print(f"I2C devices found: {[hex(d) for d in devices]}")
 
-        # Init MPU6050 (Exercise 65)
-        mpu = mpu6050.accel(i2c)
-        print("MPU6050 (Activity) OK.")
+        mpu = mpu6050.accel(i2c, MPU6050_ADDR)
+        print("MPU6050 (Vibration/Activity) OK.")
 
-        # Init BME280_A (Exercise 53)
         bme_a = bme280.BME280(i2c=i2c, address=BME280_A_ADDR)
         print("BME280 (Target) OK.")
 
-        # Init BME280_B
         bme_b = bme280.BME280(i2c=i2c, address=BME280_B_ADDR)
         print("BME280 (Ambient) OK.")
 
-        print("All sensors initialized.")
-        return True
-    except Exception as e:
-        print(f"Sensor init failed: {e}")
-        return False
+        # ADC
+        mic_adc = ADC(Pin(MIC_ADC_PIN))
+        mic_adc.atten(ADC.ATTN_11DB)  # Set full 0-3.6V range
+        print("MAX4466 (Acoustic) OK.")
 
-
-def init_sdcard():
-    global sd
-    print("Initializing SD card (Exercise 77)...")[cite: 1330]
-    try:
+        # SPI / SD
         spi = SPI(1, sck=Pin(SPI_SCK_PIN), mosi=Pin(SPI_MOSI_PIN), miso=Pin(SPI_MISO_PIN))
         sd = SDCard(spi, Pin(SPI_CS_PIN))
         uos.mount(sd, SD_MOUNT_POINT)
@@ -89,112 +77,88 @@ def init_sdcard():
         except OSError:
             print("Log file not found. Creating new one.")
             with open(LOG_FILE, 'w') as f:
-                f.write("timestamp,event_type,duration_ms,avg_delta_pa,activity\n")
+                f.write("timestamp,pressure_delta,vibration_mag,audio_level\n")
 
+        print("--- Init complete. Starting logger. ---")
         return True
+
     except Exception as e:
-        print(f"SD card init failed: {e}")
+        print(f"Fatal init error: {e}")
         return False
 
 
 # --- Helper Functions ---
-def get_activity_status():
+def get_vibration_magnitude():
+    # We will use Gyro data for high-frequency vibration
     try:
-        accel_data = mpu.get_values()
-        ax = accel_data["AcX"]
-        ay = accel_data["AcY"]
-        az = accel_data["AcZ"]
+        gyro_data = mpu.get_values()
+        gx = gyro_data["GyX"]
+        gy = gyro_data["GyY"]
+        gz = gyro_data["GyZ"]
 
-        # Simple activity detection based on magnitude
-        # Values are raw, need calibration. For now, just use a rough threshold.
-        # This is a very simple check. A real one would use a small buffer.
-        mag_squared = (ax ** 2) + (ay ** 2) + (az ** 2)
-
-        # ~16384 is 1G (still). Adjust these thresholds.
-        if mag_squared < 18000 ** 2 and mag_squared > 15000 ** 2:
-            return "Still"
-        elif mag_squared > 20000 ** 2:
-            return "Moving"
-        else:
-            return "Low Activity"
-
-    except Exception as e:
-        print(f"MPU read error: {e}")
-        return "Unknown"
+        # Calculate magnitude of angular velocity
+        mag = (gx ** 2 + gy ** 2 + gz ** 2) ** 0.5
+        return mag
+    except Exception:
+        return 0.0
 
 
-def get_timestamp():
-    # Use internal RTC. Assumes it's been set, e.g., via ntptime.
-    # For a real product, add an external RTC (DS1302/DS1307) [cite: 1046, 1050]
-    t = time.localtime()
-    return f"{t[0]}-{t[1]:02d}-{t[2]:02d} {t[3]:02d}:{t[4]:02d}:{t[5]:02d}"
-
-
-def log_event(event_type, duration, avg_delta_p, activity):
-    print(f"LOGGING EVENT: {event_type}, Duration: {duration}ms, DeltaP: {avg_delta_p:.2f} Pa, Activity: {activity}")
-    try:
-        with open(LOG_FILE, 'a') as f:
-            timestamp = get_timestamp()
-            f.write(f"{timestamp},{event_type},{duration},{avg_delta_p:.2f},{activity}\n")
-    except Exception as e:
-        print(f"Failed to write to SD card: {e}")
+def get_timestamp_ms():
+    # Use ticks_ms for high-res logging
+    return time.ticks_ms()
 
 
 # --- Main Loop ---
-def run_tracker():
-    global attack_state, attack_start_time, attack_pressures, attack_activity
-
-    if not init_sensors() or not init_sdcard():
-        print("Fatal error. Halting.")
+def run_logger():
+    if not init_all():
         return
 
-    print("--- Air Rapier Tracker ACTIVE ---")
+    last_log_time = 0
+    log_buffer = []  # Buffer logs for faster SD card writes
 
     while True:
         try:
-            # 1. Read sensor data
-            # bme.pressure returns Pa
-            pressure_a = bme_a.pressure
-            pressure_b = bme_b.pressure
-            delta_p = pressure_a - pressure_b
-            current_activity = get_activity_status()
+            current_time = time.ticks_ms()
 
-            # 2. Attack Detection Logic
-            if attack_state == STATE_IDLE:
-                if delta_p < -ATTACK_THRESHOLD_PA:
-                    # ATTACK DETECTED
-                    attack_state = STATE_ATTACK
-                    attack_start_time = time.ticks_ms()
-                    attack_activity = current_activity  # Log activity at start of attack
-                    attack_pressures = [delta_p]
-                    print(f"ATTACK DETECTED! DeltaP: {delta_p:.2f} Pa")
+            if time.ticks_diff(current_time, last_log_time) >= LOG_INTERVAL_MS:
+                last_log_time = current_time
 
-            elif attack_state == STATE_ATTACK:
-                # We are currently in an attack
-                attack_pressures.append(delta_p)
+                # Get sensor snapshots
+                timestamp = get_timestamp_ms()
 
-                if delta_p > -ATTACK_END_THRESHOLD_PA:
-                    # ATTACK ENDED
-                    attack_end_time = time.ticks_ms()
-                    duration = time.ticks_diff(attack_end_time, attack_start_time)
-                    avg_delta_p = sum(attack_pressures) / len(attack_pressures)
+                # 1. Pressure Delta
+                pressure_a = bme_a.pressure
+                pressure_b = bme_b.pressure
+                delta_p = pressure_a - pressure_b  # In Pascals
 
-                    log_event("AirRapier_Attack", duration, avg_delta_p, attack_activity)
+                # 2. Vibration Magnitude
+                vib_mag = get_vibration_magnitude()
 
-                    # Reset state
-                    attack_state = STATE_IDLE
-                    attack_pressures = []
+                # 3. Audio Level
+                # Read raw ADC value (0-4095). This is faster than voltage conversion.
+                audio_level = mic_adc.read()
 
-            # Print status for debugging
-            print(
-                f"DeltaP: {delta_p:.2f} Pa | Activity: {current_activity} | State: {'IDLE' if attack_state == STATE_IDLE else 'ATTACK'}")
+                # Format data
+                log_line = f"{timestamp},{delta_p:.2f},{vib_mag:.2f},{audio_level}\n"
+                log_buffer.append(log_line)
 
-            time.sleep_ms(50)  # 20Hz sample rate
+                # Write to SD card in chunks to prevent wear and speed up loop
+                if len(log_buffer) >= 100:  # Write every 100 samples (5 seconds)
+                    with open(LOG_FILE, 'a') as f:
+                        for line in log_buffer:
+                            f.write(line)
+                    log_buffer = []  # Clear buffer
+                    print(f"Wrote 100 samples to SD card. Last: {log_line.strip()}")
 
         except Exception as e:
             print(f"Main loop error: {e}")
+            # Try to write remaining buffer before crashing
+            if log_buffer:
+                with open(LOG_FILE, 'a') as f:
+                    for line in log_buffer:
+                        f.write(line)
             time.sleep(1)
 
 
-# Run the tracker
-run_tracker()
+# Run the logger
+run_logger()
