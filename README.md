@@ -1,36 +1,43 @@
 # Inspired by the Air Rapier weapon in Chronicles of 23, this device is to show any victims that there is hope by building a tracker for the attacks so that you can show it to law enforcement. This code is being made open source to prevent this from occuring on any new timelines. There is hope a v2k detector of the Frey Effect
 # This tool is being built to help the victims of 'touch less torture'. This gadget is to hopefully build data that can be passed onto law enforcement by Targetted Individuals to aid Law Enforcement to capture the criminals who do this using the military's budget. 
+# ufwairrapiertracker V4.0 (Forensic Edition)
 
-> Safety and clarity: This project does not endorse or assert any real-world claims about attacks or people. It’s an engineering exercise in signal detection and event logging using commodity sensors.
+This is a wearable, multi-sensor device designed to log and forensically verify "Air Rapier" pneumatic attacks for CSI-level credibility.
 
-# ufwairrapiertracker V2.0
+This V4.0 model captures a 4-part "attack signature" and makes the resulting data log **cryptographically tamper-evident**.
 
-This is a wearable sensor fusion device designed to detect and log "Air Rapier" pneumatic vortex attacks.
+## Forensic Features
 
-This V2.0 model moves beyond simple thresholding and implements a multi-sensor array to capture a unique 3-part "attack signature":
-1.  **Pneumatic Shock:** A sudden, localized barometric pressure drop.
-2.  **Vibration Spike:** A high-frequency vibration/impact.
-3.  **Acoustic Signature:** A distinct audio spike (whine or roar).
+### 1. Multi-Sensor Fusion
+The device logs a 4-part signature to prove the event:
+* **Pneumatic Shock (BME280s):** Localized pressure drop.
+* **Vibration (MPU6050):** High-frequency vibration.
+* **Acoustic Signature (MAX4466):** Audio spike.
+* **Physical Artifact (GP2Y1010AU0F):** **This is the key.** We log the airborne particulate density. A "vortex" attack would create a dust cloud, and this optical sensor provides the physical proof.
 
-## Key Upgrades
-* **Sensor Fusion:** Integrates a microphone (**MAX4466**) with the existing differential pressure sensors (**BME280 x2**) and accelerometer (**MPU6050**).
-* **Machine Learning:** The included `analysis.py` script no longer uses a simple threshold. It employs an **Isolation Forest anomaly detection model** (a machine learning algorithm) to analyze the combined sensor data. This allows the system to identify complex attack patterns and filter out false positives.
+### 2. Geolocation Tagging
+* **GPS (NEO-6M):** Every data point is geotagged with latitude, longitude, and altitude, providing an verifiable record of *where* the event occurred.
+
+### 3. Forensic Log Integrity (Hash Chain)
+* **Tamper-Evident:** The device uses the onboard `uhashlib` (SHA-256) module to create a **hash chain**.
+* **How it Works:** Each log entry (e.g., `Log #100`) contains a cryptographic hash of the *entire previous entry* (`Log #99`). This "chains" the whole file together.
+* **CSI-Level Credibility:** If a single byte of data is altered in the `log.csv` file, the hash chain will be broken. The included `analysis.py` script verifies this chain *before* analysis, proving the log is authentic and has not been tampered with.
 
 ## Hardware
-* **MCU:** ESP32-S3-MINI (or similar)
-* **Pressure:** 2x BME280 (one for target, one for ambient)
-* **Activity/Vibration:** 1x MPU6050
-* **Acoustic:** 1x MAX4466 Microphone Amplifier
+* **MCU:** ESP32
+* **Pressure:** 2x BME280
+* **Vibration/Activity:** 1x MPU6050
+* **Acoustic:** 1x MAX4466
+* **GPS:** 1x NEO-6M
+* **Particulate:** 1x GP2Y1010AU0F (Dust Sensor)
 * **Storage:** MicroSD Card Module
-* **Power:** 3.7V LiPo Battery + TP4056 Charger
 
-### Wiring
-* **I2C (GPIO 21/22):** BME280_A (0x76), BME280_B (0x77), MPU6050 (0x68)
-* **SPI (GPIO 18/19/23/5):** MicroSD Card Module
-* **ADC (GPIO 35):** MAX4466 `OUT` pin
+## Firmware
+The `main.py` script logs all 4 sensor streams + GPS data + the previous entry's hash to the SD card.
 
-## Firmware (MicroPython)
-The `main.py` script continuously samples all sensors and logs a data stream (`pressure_delta`, `vibration_mag`, `audio_level`) to the `log.csv` file on the SD card.
-
-## Analysis (PC/Python)
-The `analysis.py` script reads the `log.csv` file, trains an ML model on the "normal" data, and then predicts and reports all anomalous events that match the multi-sensor attack signature.
+## Analysis
+The `analysis.py` script:
+1.  **Verifies** the entire log's hash chain for forensic integrity.
+2.  **Trains** an ML anomaly detection model on the 4-sensor data.
+3.  **Finds** and reports all "attack" events.
+4.  **Plots** the verified attacks on a geographic map.

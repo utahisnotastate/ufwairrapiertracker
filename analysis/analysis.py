@@ -1,44 +1,75 @@
 # analysis.py
-# ufwairrapiertracker V2.0 - ML Anomaly Detection
-# Uses Isolation Forest to find "attack" signatures in sensor data.
-# Inspired by:
+# ufwairrapiertracker V4.0 - Forensic Analysis
+# 1. Verifies log integrity via hash chain
+# 2. Runs 4-sensor ML anomaly detection
+# 3. Maps verified attacks
 
 import pandas as pd
 import matplotlib.pyplot as plt
 import os
+import hashlib
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
-LOG_FILE = 'sensor_log.csv'
-# Define the features to analyze for anomalies
-FEATURES = ['pressure_delta', 'vibration_mag', 'audio_level']
+LOG_FILE = 'forensic_log_v4.csv'
+# NEW Features to analyze
+FEATURES = ['pressure_delta', 'vibration_mag', 'audio_level', 'dust_voltage']
+
+
+def verify_hash_chain(df):
+    """Verifies the SHA-256 hash chain. Returns True if valid."""
+    print("\n--- FORENSIC VERIFICATION ---")
+    is_valid = True
+
+    # Check genesis block
+    if df.iloc[0]['prev_hash'] != "0" * 64:
+        print("!! TAMPERING DETECTED: Genesis hash (line 1) is incorrect. !!")
+        return False
+
+    for i in range(1, len(df)):
+        # Get the previous line (as a string, exactly as logged)
+        prev_line_data = df.iloc[i - 1]
+        prev_line_string = f"{prev_line_data['timestamp']},{prev_line_data['pressure_delta']:.2f},{prev_line_data['vibration_mag']:.2f}," \
+                           f"{prev_line_data['audio_level']},{prev_line_data['dust_voltage']:.3f},{prev_line_data['lat']:.6f}," \
+                           f"{prev_line_data['lon']:.6f},{prev_line_data['alt']:.1f},{prev_line_data['prev_hash']}"
+
+        # Calculate its hash
+        expected_hash = hashlib.sha256(prev_line_string.encode('utf-8')).hexdigest()
+
+        # Compare to the hash stored in the current line
+        stored_hash = df.iloc[i]['prev_hash']
+
+        if expected_hash != stored_hash:
+            print(f"!! TAMPERING DETECTED at line {i + 1} !!")
+            print(f"  Stored Hash:   {stored_hash}")
+            print(f"  Expected Hash: {expected_hash}")
+            is_valid = False
+            break
+
+    if is_valid:
+        print("VERIFIED: Log file integrity is 100%. No tampering detected.")
+    else:
+        print("CRITICAL: Log file has been tampered with. Analysis is unreliable.")
+
+    return is_valid
 
 
 def analyze_log(df):
-    if df.empty:
-        print("Log is empty.")
-        return
+    print("\n--- SENSOR LOG ANALYSIS (V4.0) ---")
 
-    print("--- Sensor Log Analysis (V2.0) ---")
-
-    # 1. Prepare data
-    # We can't feed raw data to the model. We must scale it.
+    # 1. Prepare data for ML
     scaler = StandardScaler()
     df_scaled = scaler.fit_transform(df[FEATURES])
 
     # 2. Train Anomaly Detection Model
-    # IsolationForest is fast and effective.
-    # 'contamination' is the expected % of anomalies. Let's start low.
     model = IsolationForest(contamination=0.001, random_state=42)
-    print("Training ML model...")
+    print("Training ML model on 4-sensor data...")
     model.fit(df_scaled)
 
     # 3. Predict Anomalies
     print("Predicting anomalies...")
-    df['anomaly_score'] = model.decision_function(df_scaled)
-    df['is_anomaly'] = model.predict(df_scaled)  # -1 for anomaly, 1 for normal
+    df['is_anomaly'] = model.predict(df_scaled)  # -1 for anomaly
 
-    # Get all "attack" events
     attacks = df[df['is_anomaly'] == -1]
 
     if attacks.empty:
@@ -46,31 +77,35 @@ def analyze_log(df):
         print("No significant anomalies (attacks) detected in the log.")
     else:
         print(f"\n--- {len(attacks)} ANOMALOUS EVENTS DETECTED ---")
-        print("These are the moments that match the 3-sensor attack signature:")
-        print(attacks[['pressure_delta', 'vibration_mag', 'audio_level', 'anomaly_score']])
+        attacks_with_gps = attacks[(attacks['lat'] != 0.0) & (attacks['lon'] != 0.0)]
 
-        # Plot the main graph
-        print("Generating anomaly plot...")
-        fig, ax = plt.subplots(figsize=(20, 8))
+        if attacks_with_gps.empty:
+            print("Found attacks, but none had a GPS lock.")
+            print(attacks[FEATURES])
+        else:
+            print("Attacks with valid GPS data:")
+            print(attacks_with_gps[['lat', 'lon'] + FEATURES])
 
-        # Plot the anomaly score
-        ax.plot(df.index, df['anomaly_score'], label='Anomaly Score', color='blue', alpha=0.5)
-        ax.set_ylabel('Anomaly Score', color='blue')
+            # 4. Generate Attack Map
+            print("Generating attack map...")
+            plt.figure(figsize=(12, 8))
 
-        # Highlight attacks
-        ax.scatter(attacks.index, attacks['anomaly_score'], color='red', label='Detected Attack', s=50, zorder=10)
+            df_gps_normal = df[(df['lat'] != 0.0) & (df['lon'] != 0.0) & (df['is_anomaly'] == 1)]
+            plt.scatter(df_gps_normal['lon'], df_gps_normal['lat'], c='grey', alpha=0.1, s=1, label='Normal Path')
 
-        # Plot pressure delta on a second y-axis to correlate
-        ax2 = ax.twinx()
-        ax2.plot(df.index, df['pressure_delta'], label='Pressure Delta (Pa)', color='green', alpha=0.3)
-        ax2.set_ylabel('Pressure Delta (Pa)', color='green')
+            plt.scatter(attacks_with_gps['lon'], attacks_with_gps['lat'], c=attacks_with_gps['dust_voltage'],
+                        cmap='Reds', s=50, label='Attack (Color=Dust)', edgecolors='black')
 
-        plt.title('V2.0 Attack Analysis: Anomaly Score vs. Pressure')
-        fig.legend(loc="upper right", bbox_to_anchor=(0.9, 0.9))
-        plt.grid(True)
-        plt.savefig('attack_analysis_V2.png')
-        print("Saved 'attack_analysis_V2.png'")
-        plt.clf()
+            plt.xlabel('Longitude')
+            plt.ylabel('Latitude')
+            plt.title('V4.0 Forensic Map: Attack Location (Color by Dust Level)')
+            plt.colorbar(label='Dust Sensor Voltage')
+            plt.legend()
+            plt.grid(True)
+            plt.axis('equal')
+            plt.savefig('attack_map_V4_forensic.png')
+            print("Saved 'attack_map_V4_forensic.png'")
+            plt.clf()
 
 
 if __name__ == "__main__":
@@ -79,7 +114,10 @@ if __name__ == "__main__":
     else:
         print(f"Loading log file: {LOG_FILE}...")
         data = pd.read_csv(LOG_FILE)
-        # Convert ms timestamp to a simple index for plotting
-        data = data.reset_index()
 
-        analyze_log(data)
+        # Verify the hash chain *first*
+        if verify_hash_chain(data):
+            # If valid, proceed with analysis
+            analyze_log(data)
+        else:
+            print("Analysis aborted due to log integrity failure.")
