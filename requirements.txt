@@ -1,0 +1,6 @@
+# Desktop analysis dependencies
+# Note: Firmware runs on MicroPython (modules like machine, uos) and uses local drivers
+# (bme280.py, mpu6050.py, sdcard.py). Those are not installed via pip on your desktop.
+
+pandas
+matplotlib
